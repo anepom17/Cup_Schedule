@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Расписание кубков с вероятностью прохода</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+    }
+    body {
+      font-family: inherit;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .animate-spin {
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateX(100%); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes toast-out {
+      from { opacity: 1; transform: translateX(0); }
+      to { opacity: 0; transform: translateX(100%); }
+    }
+    .toast-enter {
+      animation: toast-in 0.3s ease-out forwards;
+    }
+    .toast-exit {
+      animation: toast-out 0.25s ease-in forwards;
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 text-gray-900">
+  <div class="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
+    <h1 class="text-2xl sm:text-3xl font-semibold text-center sm:text-left text-gray-800 mb-6">
+      Расписание кубков с вероятностью прохода
+    </h1>
+
+    <div class="mb-6">
+      <button
+        id="btn-refresh"
+        type="button"
+        class="w-full sm:w-auto min-h-[48px] px-8 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-medium text-base shadow-sm disabled:opacity-70 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+        aria-busy="false"
+      >
+        <span id="btn-text">Обновить расписание</span>
+        <span id="btn-spinner" class="hidden" aria-hidden="true">
+          <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+        </span>
+      </button>
+    </div>
+
+    <div
+      id="results-container"
+      class="rounded-2xl bg-white/80 shadow-sm border border-gray-200/60 overflow-hidden"
+      role="region"
+      aria-live="polite"
+    >
+      <div id="results-placeholder" class="py-12 px-4 text-center text-gray-500">
+        Нет данных. Нажмите «Обновить расписание», чтобы загрузить.
+      </div>
+      <div id="results-table-wrapper" class="hidden overflow-x-auto">
+        <table id="results-table" class="w-full min-w-[640px] text-sm border-collapse">
+          <thead>
+            <tr class="bg-gray-100/80 border-b border-gray-200">
+              <th class="text-left py-3 px-3 font-medium text-gray-700">Время</th>
+              <th class="text-left py-3 px-3 font-medium text-gray-700">Матч</th>
+              <th class="text-left py-3 px-3 font-medium text-gray-700">Страна</th>
+              <th class="text-left py-3 px-3 font-medium text-gray-700">Вероятность</th>
+              <th class="text-left py-3 px-3 font-medium text-gray-700">Причина</th>
+            </tr>
+          </thead>
+          <tbody id="results-tbody">
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-none" aria-live="assertive"></div>
+
+  <script>
+    const WEBHOOK_URL = 'https://nepom.app.n8n.cloud/webhook/get-matches';
+
+    const btnRefresh = document.getElementById('btn-refresh');
+    const btnText = document.getElementById('btn-text');
+    const btnSpinner = document.getElementById('btn-spinner');
+    const resultsPlaceholder = document.getElementById('results-placeholder');
+    const resultsTableWrapper = document.getElementById('results-table-wrapper');
+    const resultsTbody = document.getElementById('results-tbody');
+    const toastContainer = document.getElementById('toast-container');
+
+    function setLoading(loading) {
+      btnRefresh.disabled = loading;
+      btnRefresh.setAttribute('aria-busy', loading ? 'true' : 'false');
+      btnText.textContent = loading ? 'Анализирую...' : 'Обновить расписание';
+      btnSpinner.classList.toggle('hidden', !loading);
+    }
+
+    function getProbabilityClasses(probability) {
+      const p = (probability || '').toLowerCase();
+      if (p === 'high') return 'bg-green-100 text-green-800';
+      if (p === 'medium') return 'bg-amber-100 text-amber-800';
+      if (p === 'low') return 'bg-gray-100 text-gray-700';
+      return 'bg-gray-50 text-gray-600';
+    }
+
+    function getTimeSlotClasses(count) {
+      if (count > 4) return 'bg-red-200';
+      if (count > 2) return 'bg-amber-200';
+      return '';
+    }
+
+    function buildTimeCountMap(data) {
+      const map = new Map();
+      for (const row of data) {
+        const key = row.human_time ?? row.time ?? '';
+        map.set(key, (map.get(key) || 0) + 1);
+      }
+      return map;
+    }
+
+    function renderTable(data) {
+      if (!Array.isArray(data) || data.length === 0) {
+        resultsPlaceholder.classList.remove('hidden');
+        resultsTableWrapper.classList.add('hidden');
+        resultsPlaceholder.textContent = 'Нет данных. Нажмите «Обновить расписание», чтобы загрузить.';
+        return;
+      }
+
+      const timeCountMap = buildTimeCountMap(data);
+      resultsTbody.innerHTML = '';
+
+      for (const row of data) {
+        const time = row.human_time ?? row.time ?? '';
+        const count = timeCountMap.get(time) || 0;
+        const timeSlotClass = getTimeSlotClasses(count);
+        const probClass = getProbabilityClasses(row.probability);
+
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-gray-100 hover:bg-gray-50/50';
+        tr.innerHTML =
+          '<td class="py-3 px-3 ' + timeSlotClass + '">' + escapeHtml(time) + '</td>' +
+          '<td class="py-3 px-3">' + escapeHtml(row.match ?? '') + '</td>' +
+          '<td class="py-3 px-3">' + escapeHtml(row.country ?? '') + '</td>' +
+          '<td class="py-3 px-3"><span class="inline-block px-2 py-1 rounded ' + probClass + '">' + escapeHtml(row.probability ?? '') + '</span></td>' +
+          '<td class="py-3 px-3 text-gray-600">' + escapeHtml(row.reason ?? '') + '</td>';
+        resultsTbody.appendChild(tr);
+      }
+
+      resultsPlaceholder.classList.add('hidden');
+      resultsTableWrapper.classList.remove('hidden');
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function showToast(message, isError = true) {
+      const id = 'toast-' + Date.now();
+      const el = document.createElement('div');
+      el.id = id;
+      el.className = 'toast-enter rounded-xl shadow-lg px-4 py-3 text-sm ' +
+        (isError ? 'bg-red-50 border border-red-200 text-red-800' : 'bg-gray-100 border border-gray-200 text-gray-800');
+      el.textContent = message;
+      toastContainer.appendChild(el);
+
+      setTimeout(() => {
+        el.classList.remove('toast-enter');
+        el.classList.add('toast-exit');
+        setTimeout(() => el.remove(), 280);
+      }, 5000);
+    }
+
+    async function fetchSchedule() {
+      setLoading(true);
+      try {
+        const res = await fetch(WEBHOOK_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        if (!res.ok) {
+          throw new Error('Ошибка сети: ' + res.status + '. Проверьте URL webhook и подключение.');
+        }
+        const raw = await res.text();
+        let data;
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          throw new Error('Не удалось разобрать ответ сервера.');
+        }
+        const list = Array.isArray(data) ? data : (data.data != null ? data.data : []);
+        renderTable(list);
+      } catch (err) {
+        const msg = err.message || 'Не удалось загрузить расписание. Проверьте подключение и URL webhook.';
+        showToast(msg, true);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    btnRefresh.addEventListener('click', fetchSchedule);
+  </script>
+</body>
+</html>
